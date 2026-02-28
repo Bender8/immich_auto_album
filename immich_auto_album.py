@@ -79,7 +79,7 @@ class ImmichClient:
         while keep_going:
             batch_range = range(page, page + MAX_CONCURRENT_REQUESTS)
             tasks = [self.fetch_metadata_page(p) for p in batch_range]
-            results = await asyncio.gather(*tasks)  #
+            results = await asyncio.gather(*tasks)
 
             for page_items in results:
                 if page_items is None:
@@ -167,60 +167,63 @@ class ImmichClient:
                     logger.error(f"Failed to remove assets from {album_id}: {await resp.text()}")
 
 
-def filter_assets(
-    assets: List[Dict[str, Any]], key: str, val: Any, match_all: bool = False
-) -> List[str]:
-    """
-    Applies a sync rule filter to the full asset list.
-    Uses guard clauses for clarity and speed.
-    """
-    # GUARD: Handle "None" (e.g., photos with no people or no tags)
-    if val is None:
-        return [str(a["id"]) for a in assets if not a.get(key) and "id" in a]
+def check_single_filter(asset: Dict[str, Any], key: str, val: Any, match_all: bool = False) -> bool:
+    """Returns True if the asset passes this specific filter rule."""
+    raw_meta = asset.get(key)
 
-    # Normalize our target into a set for O(1) lookups
-    target_set: Set[Any] = set(val) if isinstance(val, list) else {val}
+    # 1. Handle "None" (Untagged/No People)
+    if val is None:
+        return not raw_meta  # Returns True if metadata is None, [], or ""
+
+    # 2. Normalize target into a set
+    target_set = set(val) if isinstance(val, list) else {val}
+
+    # 3. Handle single values (type="IMAGE", isFavorite=True)
+    if not isinstance(raw_meta, list):
+        return raw_meta in target_set
+
+    # 4. Handle Lists (People/Tags)
+    photo_meta_set = {(p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p}
+
+    if match_all:
+        return target_set.issubset(photo_meta_set)
+    return not target_set.isdisjoint(photo_meta_set)
+
+
+def filter_assets(assets: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> List[str]:
+    """
+    Applies a list of rules to the assets.
+    Every rule in the 'rules' list must be True (AND logic between rules).
+    """
     results: List[str] = []
 
     for a in assets:
         asset_id = a.get("id")
         if not asset_id:
             continue
-
-        raw_meta = a.get(key)
-
-        # GUARD: Handle single values (type="IMAGE", isFavorite=True)
-        if not isinstance(raw_meta, list):
-            if raw_meta in target_set:
-                results.append(str(asset_id))
-            continue
-
-        # LOGIC FOR LISTS: Flatten People (dicts) or Tags (strings)
-        photo_meta_set = {(p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p}
-
-        if match_all:
-            # All items in target_set must be in photo_meta_set
-            if target_set.issubset(photo_meta_set):
-                results.append(str(asset_id))
-        else:
-            # Any item in target_set can be in photo_meta_set
-            if not target_set.isdisjoint(photo_meta_set):
-                results.append(str(asset_id))
+        # A photo starts as "passed" and must survive every rule
+        if all(
+            check_single_filter(a, r["key"], r["val"], r.get("match_all", False)) for r in rules
+        ):
+            results.append(str(asset_id))
     return results
 
 
 async def sync_album_task(client: ImmichClient, all_assets: List[dict], config: dict) -> dict:
-    """Individual worker task to sync one album."""
-    name = config["name"]
-    key = config["key"]
-    val = config["val"]
+    """Worker task that processes a list of filters for a single album."""
+    name: str = config["name"]
+    rules: List[dict] = config["filters"]  # No more fallback checks
 
-    if key == "people" and isinstance(val, list):
-        val = client.resolve_people_names(val)
+    # Clean up any 'people' names in the filters into UUIDs immediately
+    for r in rules:
+        if r.get("key") == "people" and isinstance(r.get("val"), list):
+            r["val"] = client.resolve_people_names(r["val"])
 
     try:
         album_id = await client.get_or_create_album(name)
-        target_ids = set(filter_assets(all_assets, key, val, config.get("match_all", False)))
+
+        # All logic is now centralized in filter_assets
+        target_ids = set(filter_assets(all_assets, rules))
         current_ids = await client.get_album_assets(album_id)
 
         to_add = list(target_ids - current_ids)
