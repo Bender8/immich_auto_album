@@ -8,6 +8,17 @@ API_KEY: str = "YOUR_API_KEY_HERE"
 # Maximum simultaneous API requests (higher is faster, but increases server load).
 MAX_CONCURRENT_REQUESTS: int = 4
 
+# Email on error configuration
+ENABLE_EMAIL_ON_ERROR: bool = True  # Set to True to enable sending emails
+# Gmail SMTP settings (for Gmail use smtp.gmail.com and port 465 with SSL)
+# NOTE: For Gmail you should use an app password (not your account password).
+EMAIL_SMTP_SERVER: str = "smtp.gmail.com"
+EMAIL_SMTP_PORT: int = 465  # SSL port
+EMAIL_USERNAME: str = "your.email@gmail.com"  # Gmail address
+EMAIL_PASSWORD: str = "your_app_password"  # Use an app password
+EMAIL_FROM: str = EMAIL_USERNAME
+EMAIL_TO: str = "recipient@example.com"
+
 # --- SYNC_CONFIGS SETUP ---
 # Each entry creates or updates an Immich Album based on "Sync Rules."
 # Rules use keys from the Immich Search API: https://api.immich.app/endpoints/search/searchAssets

@@ -1,6 +1,10 @@
 import asyncio
 import logging
+import smtplib
+import ssl
 import sys
+import traceback
+from email.message import EmailMessage
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Set
 
@@ -18,16 +22,24 @@ log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 rotating_handler.setFormatter(log_formatter)
 
 stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(log_formatter)
+stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
 
 # Configure the root logger
 logging.basicConfig(level=logging.INFO, handlers=[rotating_handler, stream_handler])
 logger = logging.getLogger(__name__)
 
+
 # --- CONFIGURATION LOADING ---
 try:
     from local_settings import (
         API_KEY,
+        EMAIL_FROM,
+        EMAIL_PASSWORD,
+        EMAIL_SMTP_PORT,
+        EMAIL_SMTP_SERVER,
+        EMAIL_TO,
+        EMAIL_USERNAME,
+        ENABLE_EMAIL_ON_ERROR,
         IMMICH_BASE_URL,
         MAX_CONCURRENT_REQUESTS,
         SYNC_CONFIGS,
@@ -35,6 +47,34 @@ try:
 except ImportError:
     logger.error("local_settings.py not found! Please create it from example_local_setting.py.")
     sys.exit(1)
+
+
+def send_error_email(exc: Exception) -> None:
+    """Send an email containing the exception traceback. Uses the Gmail SMTP settings above."""
+    if not ENABLE_EMAIL_ON_ERROR:
+        return
+
+    try:
+        tb = traceback.format_exc()
+        subject = f"[Auto Album Sync] Unhandled exception: {type(exc).__name__}"
+        body = f"An unhandled exception occurred in immich_auto_album.py:\n\nException: {exc}\n\nTraceback:\n{tb}"
+
+        msg = EmailMessage()
+        msg["From"] = EMAIL_FROM
+        msg["To"] = EMAIL_TO
+        msg["Subject"] = subject
+        msg.set_content(body)
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(EMAIL_SMTP_SERVER, EMAIL_SMTP_PORT, context=context) as server:
+            server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        logging.info("Error notification email sent successfully.")
+
+    except Exception:
+        logging.error("Failed to send error notification email.", exc_info=True)
+
 
 # Constants derived from settings
 BASE_URL: str = IMMICH_BASE_URL.rstrip("/")
@@ -289,7 +329,7 @@ async def main() -> None:
             )
         except Exception as e:
             logger.error(f"Initialization failed: {e}")
-            return
+            raise
 
         logger.info(f"Syncing {len(SYNC_CONFIGS)} albums defined in local_settings.py...")
 
@@ -329,3 +369,9 @@ if __name__ == "__main__":
     except Exception as e:
         # Final catch-all for any unhandled exceptions
         logger.error(f"Fatal error during execution: {e}")
+        # Send email notification if enabled
+        try:
+            send_error_email(e)
+        except Exception:
+            # send_error_email already logs failures; avoid raising from the global exception handler
+            pass

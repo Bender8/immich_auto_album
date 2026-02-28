@@ -53,12 +53,29 @@ cp example_local_settings.py local_settings.py
 - `IMMICH_BASE_URL` — your Immich server base URL (e.g. `https://immich.example.com`)
 - `API_KEY` — API key created in Immich
 - `SYNC_CONFIGS` — a list of declarative album configs (examples below)
+- Email Configuration (Optional, for error notifications):
+    - `ENABLE_EMAIL_ON_ERROR` — set to `True` to enable email notifications on unhandled errors.
+    - `EMAIL_SMTP_SERVER` — SMTP server address (e.g., `smtp.gmail.com`).
+    - `EMAIL_SMTP_PORT` — SMTP server port (e.g., `465` for SSL).
+    - `EMAIL_USERNAME` — Your email username (often your full email address).
+    - `EMAIL_PASSWORD` — Your email password or app-specific password. **Highly recommended to use an app-specific password for security.**
+    - `EMAIL_FROM` — The sender email address.
+    - `EMAIL_TO` — The recipient email address for error notifications.
 
 Minimal `local_settings.py` example:
 ```immich_auto_album/README.md#L214-229
 # local_settings.py
 IMMICH_BASE_URL = "https://immich.example.com"
 API_KEY = "your_api_key_here"
+
+# Optional: Email error notifications
+ENABLE_EMAIL_ON_ERROR = False  # Set to True to enable
+EMAIL_SMTP_SERVER = "smtp.gmail.com"
+EMAIL_SMTP_PORT = 465
+EMAIL_USERNAME = "your_email@gmail.com"
+EMAIL_PASSWORD = "your_app_password"  # Use an app-specific password!
+EMAIL_FROM = "immich-auto-album@example.com"
+EMAIL_TO = "your_admin_email@example.com"
 
 # Example of a SYNC_CONFIGS entry:
 SYNC_CONFIGS = [
