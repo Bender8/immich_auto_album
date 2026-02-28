@@ -1,6 +1,8 @@
 # Immich Auto-Album Sync
 
-An asynchronous Python script to create declarative "Smart Albums" in Immich. The script syncs assets into albums based on flexible metadata rules (People, Favorites, Asset Type, etc.) and is designed to run as a recurring cron job.
+An asynchronous Python script to create declarative "Smart Albums" in Immich. The script syncs assets into albums based on flexible metadata rules (People, Favorites, Asset Type, etc.). 
+
+Rules use keys from the Immich Search API: https://api.immich.app/endpoints/search/searchAssets. Any item in the metadata can be used as a filter key.
 
 ---
 
