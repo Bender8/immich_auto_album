@@ -167,27 +167,51 @@ class ImmichClient:
                     logger.error(f"Failed to remove assets from {album_id}: {await resp.text()}")
 
 
-def check_single_filter(asset: Dict[str, Any], key: str, val: Any, match_all: bool = False) -> bool:
-    """Returns True if the asset passes this specific filter rule."""
+def check_single_filter(asset: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+    """
+    Evaluates a single metadata rule against an asset.
+    Supported operators: OR (default), AND, NOT, ONLY.
+    """
+    key = rule["key"]
+    val = rule["val"]
+    # Default to "OR" and handle case-insensitivity for safety
+    op = str(rule.get("operator", "OR")).upper()
+
     raw_meta = asset.get(key)
 
     # 1. Handle "None" (Untagged/No People)
+    # Logic: if op is NOT, we want photos that DO have people.
+    # Otherwise, we want photos that HAVE NO people.
     if val is None:
-        return not raw_meta  # Returns True if metadata is None, [], or ""
+        has_no_meta = not raw_meta
+        return not has_no_meta if op == "NOT" else has_no_meta
 
-    # 2. Normalize target into a set
+    # 2. Normalize Target and Asset Metadata into Sets
     target_set = set(val) if isinstance(val, list) else {val}
 
-    # 3. Handle single values (type="IMAGE", isFavorite=True)
-    if not isinstance(raw_meta, list):
-        return raw_meta in target_set
+    if isinstance(raw_meta, list):
+        # Flatten People (dicts) or Tags (strings)
+        asset_set = {(p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p}
+    else:
+        # Handle single values (type, isFavorite, etc.)
+        asset_set = {raw_meta}
 
-    # 4. Handle Lists (People/Tags)
-    photo_meta_set = {(p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p}
+    # 3. Apply Logic based on Operator
+    if op == "AND":
+        # Every item in target must be in the asset
+        return target_set.issubset(asset_set)
 
-    if match_all:
-        return target_set.issubset(photo_meta_set)
-    return not target_set.isdisjoint(photo_meta_set)
+    elif op == "ONLY":
+        # Asset must contain exactly the target items and nothing else
+        return target_set == asset_set
+
+    elif op == "NOT":
+        # Asset must contain NONE of the target items
+        return target_set.isdisjoint(asset_set)
+
+    else:  # Default to "OR"
+        # Asset must contain AT LEAST ONE of the target items
+        return not target_set.isdisjoint(asset_set)
 
 
 def filter_assets(assets: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> List[str]:
@@ -202,9 +226,7 @@ def filter_assets(assets: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> 
         if not asset_id:
             continue
         # A photo starts as "passed" and must survive every rule
-        if all(
-            check_single_filter(a, r["key"], r["val"], r.get("match_all", False)) for r in rules
-        ):
+        if all(check_single_filter(a, r) for r in rules):
             results.append(str(asset_id))
     return results
 
@@ -212,7 +234,7 @@ def filter_assets(assets: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> 
 async def sync_album_task(client: ImmichClient, all_assets: List[dict], config: dict) -> dict:
     """Worker task that processes a list of filters for a single album."""
     name: str = config["name"]
-    rules: List[dict] = config["filters"]  # No more fallback checks
+    rules: List[dict] = config["filters"]
 
     # Clean up any 'people' names in the filters into UUIDs immediately
     for r in rules:
