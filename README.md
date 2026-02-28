@@ -7,7 +7,7 @@ An asynchronous Python script to create declarative "Smart Albums" in Immich. Th
 ## Features
 
 - Fast & Asynchronous: Uses `aiohttp` and `asyncio` to process thousands of assets quickly.
-- Smart Logic: Supports both "AND" (all people present) and "OR" (any of these people) filtering.
+- Smart Logic: Supports flexible operators (`AND`, `OR`, `NOT`, `ONLY`) for precise filtering.
 - Multi-filter Support: Combine rules (e.g., "Favorite Videos of Person A").
 - Declarative Sync: Automatically adds matching assets and removes those that no longer match.
 - Safe Execution: Concurrency semaphores prevent overwhelming your Immich server.
@@ -65,7 +65,7 @@ SYNC_CONFIGS = [
     {
         "name": "Family",
         "filters": [
-            {"key": "people", "val": ["Person A", "Person B"], "match_all": False}
+            {"key": "people", "val": ["Person A", "Person B"], "operator": "OR"}
         ],
     },
 ]
@@ -83,7 +83,7 @@ Simple "OR" Filter — Finds any photo containing Person A or Person B:
     {
       "key": "people",
       "val": ["Person A", "Person B"],
-      "match_all": false
+      "operator": "OR"
     }
   ]
 }
@@ -97,7 +97,35 @@ Strict "AND" Filter — Only finds photos where Person A and Person B are togeth
     {
       "key": "people",
       "val": ["Person A", "Person B"],
-      "match_all": true
+      "operator": "AND"
+    }
+  ]
+}
+```
+
+Exclusive "ONLY" Filter — Only finds photos containing *exactly* Person A and Person B, and no one else:
+```immich_auto_album/README.md#L85-94
+{
+  "name": "Only Us",
+  "filters": [
+    {
+      "key": "people",
+      "val": ["Person A", "Person B"],
+      "operator": "ONLY"
+    }
+  ]
+}
+```
+
+Exclusion "NOT" Filter — Finds photos that do NOT contain Person C:
+```immich_auto_album/README.md#L95-104
+{
+  "name": "No Person C",
+  "filters": [
+    {
+      "key": "people",
+      "val": ["Person C"],
+      "operator": "NOT"
     }
   ]
 }
@@ -121,7 +149,7 @@ You can combine multiple filters in a single album config. For example, "Favorit
 {
   "name": "Person A - Favorite Videos",
   "filters": [
-    {"key": "people", "val": ["Person A"], "match_all": false},
+    {"key": "people", "val": ["Person A"], "operator": "OR"},
     {"key": "is_favorite", "val": true},
     {"key": "asset_type", "val": "video"}
   ]
@@ -132,7 +160,12 @@ Supported filter keys (examples):
 - `people` — list of person names or `null` for no faces
 - `is_favorite` — boolean
 - `asset_type` — `"photo"` or `"video"`
-- (Extendable — check script docs or source for additional keys)
+
+Supported operators:
+- `OR` (default) — asset matches at least one value in `val`
+- `AND` — asset matches all values in `val`
+- `NOT` — asset matches none of the values in `val`
+- `ONLY` — asset matches exactly the values in `val` and no others
 
 ---
 
