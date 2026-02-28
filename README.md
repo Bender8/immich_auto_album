@@ -170,14 +170,6 @@ Notes:
 - Add unit tests for new features where possible.
 - Keep configuration declarative and documented in `example_local_settings.py`.
 
----
-
-## FAQ
-
-Q: How do I know what person names to use in `people`?
-A: Use the exact display names used in Immich's face tags. If in doubt, export or inspect Immich tagging data via the API or the web UI.
-
----
 
 ## License
 
