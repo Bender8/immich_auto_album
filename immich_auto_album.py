@@ -33,9 +33,7 @@ try:
         SYNC_CONFIGS,
     )
 except ImportError:
-    logger.error(
-        "local_settings.py not found! Please create it from example_local_setting.py."
-    )
+    logger.error("local_settings.py not found! Please create it from example_local_setting.py.")
     sys.exit(1)
 
 # Constants derived from settings
@@ -86,9 +84,7 @@ class ImmichClient:
             for page_items in results:
                 if page_items is None:
                     # OPTION: Raise error to prevent data loss
-                    raise RuntimeError(
-                        f"Metadata pull failed at page {page}. Data is incomplete."
-                    )
+                    raise RuntimeError(f"Metadata pull failed at page {page}. Data is incomplete.")
 
                 if not page_items:  # True empty list [] means end of library
                     keep_going = False
@@ -130,9 +126,7 @@ class ImmichClient:
             resp.raise_for_status()
             data = await resp.json()
             people_list = data.get("people", [])
-            self._people_lookup = {
-                p["name"].lower(): p["id"] for p in people_list if p.get("name")
-            }
+            self._people_lookup = {p["name"].lower(): p["id"] for p in people_list if p.get("name")}
 
     def resolve_people_names(self, names: List[str]) -> List[str]:
         """Converts a list of person names to their UUIDs using the cache."""
@@ -142,9 +136,7 @@ class ImmichClient:
             if clean_name in self._people_lookup:
                 uuids.append(self._people_lookup[clean_name])
             else:
-                logger.warning(
-                    f"Could not find person '{name}' in Immich. Check spelling!"
-                )
+                logger.warning(f"Could not find person '{name}' in Immich. Check spelling!")
         return uuids
 
     async def get_album_assets(self, album_id: str) -> Set[str]:
@@ -155,9 +147,7 @@ class ImmichClient:
             data = await resp.json()
             return {asset["id"] for asset in data.get("assets", [])}
 
-    async def update_album_assets(
-        self, album_id: str, to_add: List[str], to_remove: List[str]
-    ):
+    async def update_album_assets(self, album_id: str, to_add: List[str], to_remove: List[str]):
         """Performs bulk addition and removal of assets in chunks for stability."""
         url = f"{BASE_URL}/api/albums/{album_id}/assets"
         chunk_size = 2000
@@ -167,21 +157,19 @@ class ImmichClient:
             chunk = to_add[i : i + chunk_size]
             async with self.session.put(url, json={"ids": chunk}) as resp:
                 if resp.status not in (200, 201):
-                    logger.error(
-                        f"Failed to add assets to {album_id}: {await resp.text()}"
-                    )
+                    logger.error(f"Failed to add assets to {album_id}: {await resp.text()}")
 
         # Remove assets
         for i in range(0, len(to_remove), chunk_size):
             chunk = to_remove[i : i + chunk_size]
             async with self.session.delete(url, json={"ids": chunk}) as resp:
                 if resp.status not in (200, 204):
-                    logger.error(
-                        f"Failed to remove assets from {album_id}: {await resp.text()}"
-                    )
+                    logger.error(f"Failed to remove assets from {album_id}: {await resp.text()}")
 
 
-def filter_assets(assets: List[Dict[str, Any]], key: str, val: Any) -> List[str]:
+def filter_assets(
+    assets: List[Dict[str, Any]], key: str, val: Any, match_all: bool = False
+) -> List[str]:
     """
     Applies a sync rule filter to the full asset list.
     Uses guard clauses for clarity and speed.
@@ -208,20 +196,20 @@ def filter_assets(assets: List[Dict[str, Any]], key: str, val: Any) -> List[str]
             continue
 
         # LOGIC FOR LISTS: Flatten People (dicts) or Tags (strings)
-        photo_meta_set = {
-            (p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p
-        }
+        photo_meta_set = {(p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p}
 
-        # Check for ANY overlap between our target and the photo's metadata
-        if not target_set.isdisjoint(photo_meta_set):
-            results.append(str(asset_id))
-
+        if match_all:
+            # All items in target_set must be in photo_meta_set
+            if target_set.issubset(photo_meta_set):
+                results.append(str(asset_id))
+        else:
+            # Any item in target_set can be in photo_meta_set
+            if not target_set.isdisjoint(photo_meta_set):
+                results.append(str(asset_id))
     return results
 
 
-async def sync_album_task(
-    client: ImmichClient, all_assets: List[dict], config: dict
-) -> dict:
+async def sync_album_task(client: ImmichClient, all_assets: List[dict], config: dict) -> dict:
     """Individual worker task to sync one album."""
     name = config["name"]
     key = config["key"]
@@ -232,7 +220,7 @@ async def sync_album_task(
 
     try:
         album_id = await client.get_or_create_album(name)
-        target_ids = set(filter_assets(all_assets, key, val))
+        target_ids = set(filter_assets(all_assets, key, val, config.get("match_all", False)))
         current_ids = await client.get_album_assets(album_id)
 
         to_add = list(target_ids - current_ids)
@@ -240,9 +228,7 @@ async def sync_album_task(
 
         if to_add or to_remove:
             await client.update_album_assets(album_id, to_add, to_remove)
-            logger.info(
-                f"Album '{name}': Added {len(to_add)}, Removed {len(to_remove)}"
-            )
+            logger.info(f"Album '{name}': Added {len(to_add)}, Removed {len(to_remove)}")
         else:
             logger.debug(f"Album '{name}': Already in sync")
 
@@ -280,14 +266,10 @@ async def main() -> None:
             logger.error(f"Initialization failed: {e}")
             return
 
-        logger.info(
-            f"Syncing {len(SYNC_CONFIGS)} albums defined in local_settings.py..."
-        )
+        logger.info(f"Syncing {len(SYNC_CONFIGS)} albums defined in local_settings.py...")
 
         # Schedule sync tasks for all configured albums
-        sync_tasks = [
-            sync_album_task(client, all_assets, config) for config in SYNC_CONFIGS
-        ]
+        sync_tasks = [sync_album_task(client, all_assets, config) for config in SYNC_CONFIGS]
 
         # results will be a list of dictionaries containing sync summaries or errors
         summaries: List[Dict[str, Any]] = await asyncio.gather(*sync_tasks)
@@ -295,9 +277,7 @@ async def main() -> None:
         # Build and Log the Final Report
         # Using logger.info ensures this table is saved to your .log file for cron history
         report_header = "\n" + "=" * 65
-        report_header += (
-            f"\n{'ALBUM NAME':<25} | {'ADDED':<6} | {'REM':<6} | {'TOTAL':<6}"
-        )
+        report_header += f"\n{'ALBUM NAME':<25} | {'ADDED':<6} | {'REM':<6} | {'TOTAL':<6}"
         report_header += "\n" + "-" * 65
         logger.info(report_header)
 
