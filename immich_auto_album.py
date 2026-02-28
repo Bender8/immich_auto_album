@@ -1,9 +1,30 @@
 import asyncio
-from typing import Any
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+from typing import Any, Dict, List, Optional, Set
 
 import aiohttp
 
-# Configuration load
+# --- LOGGING CONFIGURATION ---
+# maxBytes: 5 * 1024 * 1024 is 5 Megabytes
+# backupCount: Keeps the 3 most recent historical log files
+rotating_handler = RotatingFileHandler(
+    "immich_auto_album.log", maxBytes=5 * 1024 * 1024, backupCount=3
+)
+
+# Define the format for both handlers
+log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+rotating_handler.setFormatter(log_formatter)
+
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(log_formatter)
+
+# Configure the root logger
+logging.basicConfig(level=logging.INFO, handlers=[rotating_handler, stream_handler])
+logger = logging.getLogger(__name__)
+
+# --- CONFIGURATION LOADING ---
 try:
     from local_settings import (
         API_KEY,
@@ -12,233 +33,294 @@ try:
         SYNC_CONFIGS,
     )
 except ImportError:
-    print("❌ ERROR: local_settings.py not found!")
-    exit(1)
+    logger.error(
+        "local_settings.py not found! Please create it from example_local_setting.py."
+    )
+    sys.exit(1)
 
-# Safety check for URL trailing slashes
-IMMICH_BASE_URL: str = IMMICH_BASE_URL.rstrip("/")
-# -----------------------------------------------------------------------------
-
-
-async def fetch_page(
-    session: aiohttp.ClientSession, page: int, sem: asyncio.Semaphore
-) -> list[dict]:
-    """Fetches a single page. Returns empty list if 404 or no items."""
-    url: str = f"{IMMICH_BASE_URL}/api/search/metadata"
-    payload: dict = {"withPeople": True, "size": 1000, "page": page}
-
-    async with sem:
-        try:
-            async with session.post(url, json=payload, timeout=30) as response:
-                if response.status != 200:
-                    return []
-                data = await response.json()
-                # Use .get() chains to safely reach the items list
-                return data.get("assets", {}).get("items", [])
-        except Exception as e:
-            print(f"Error fetching page {page}: {e}")
-            return []
+# Constants derived from settings
+BASE_URL: str = IMMICH_BASE_URL.rstrip("/")
+HEADERS = {"x-api-key": API_KEY, "Content-Type": "application/json"}
 
 
-async def pull_all_immich_metadata(session: aiohttp.ClientSession) -> dict[str, Any]:
+class ImmichClient:
     """
-    Fetches assets in concurrent batches until an empty page is hit.
-    This bypasses the unreliable 'total' field in Immich v2.5.6.
+    The ImmichClient class encapsulates all communication with the Immich API.
     """
-    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    all_items: list[dict] = []
-    page = 1
-    keep_going = True
 
-    print(f"Starting metadata pull (Batch size: {MAX_CONCURRENT_REQUESTS})...")
+    def __init__(self, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore):
+        self.session = session
+        self.sem = semaphore
+        self._album_cache: Dict[str, str] = {}  # Mapping of "Album Name" -> "uuid"
+        self._people_lookup: Dict[str, str] = {}  # Mapping of "person name" -> "uuid"
 
-    while keep_going:
-        # Create a batch of tasks (e.g., pages 1-5, then 6-10)
-        batch_range = range(page, page + MAX_CONCURRENT_REQUESTS)
-        tasks = [fetch_page(session, p, sem) for p in batch_range]
+    async def fetch_metadata_page(self, page: int) -> Optional[List[dict]]:
+        """Returns metadata list if successful, [] if end of data, None if error."""
+        url = f"{BASE_URL}/api/search/metadata"
+        payload = {"withPeople": True, "size": 1000, "page": page}
 
-        results = await asyncio.gather(*tasks)
+        async with self.sem:
+            try:
+                async with self.session.post(url, json=payload, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Return items list; Immich usually returns [] at the end
+                        return data.get("assets", {}).get("items", [])
 
-        for page_items in results:
-            if not page_items:
-                keep_going = False
-                break
-            all_items.extend(page_items)
+                    logger.error(f"Page {page} failed with status {resp.status}")
+                    return None  # Signal a non-terminal error
+            except Exception as e:
+                logger.error(f"Exception on page {page}: {e}")
+                return None
 
-        if keep_going:
-            page += MAX_CONCURRENT_REQUESTS
-            # print(f"Downloaded {len(all_items)} assets so far...")
+    async def pull_all_metadata(self) -> List[dict]:
+        all_items: List[dict] = []
+        page = 1
+        keep_going = True
 
-    print(f"Finished. Total assets retrieved: {len(all_items)}")
-    return {"assets": {"items": all_items}}
+        while keep_going:
+            batch_range = range(page, page + MAX_CONCURRENT_REQUESTS)
+            tasks = [self.fetch_metadata_page(p) for p in batch_range]
+            results = await asyncio.gather(*tasks)  #
+
+            for page_items in results:
+                if page_items is None:
+                    # OPTION: Raise error to prevent data loss
+                    raise RuntimeError(
+                        f"Metadata pull failed at page {page}. Data is incomplete."
+                    )
+
+                if not page_items:  # True empty list [] means end of library
+                    keep_going = False
+                    break
+
+                all_items.extend(page_items)
+
+            if keep_going:
+                page += MAX_CONCURRENT_REQUESTS
+
+        return all_items
+
+    async def load_albums(self):
+        """Pre-loads all existing albums into the local cache to minimize API calls."""
+        url = f"{BASE_URL}/api/albums"
+        async with self.session.get(url) as resp:
+            resp.raise_for_status()
+            albums = await resp.json()
+            self._album_cache = {a["albumName"]: a["id"] for a in albums}
+
+    async def get_or_create_album(self, name: str) -> str:
+        """Returns album ID from cache; creates the album if it doesn't exist."""
+        if name in self._album_cache:
+            return self._album_cache[name]
+
+        logger.info(f"Creating new album: '{name}'")
+        url = f"{BASE_URL}/api/albums"
+        async with self.session.post(url, json={"albumName": name}) as resp:
+            resp.raise_for_status()
+            new_album = await resp.json()
+            album_id = str(new_album["id"])
+            self._album_cache[name] = album_id
+            return album_id
+
+    async def load_people(self):
+        """Pre-loads people mapping into the local cache."""
+        url = f"{BASE_URL}/api/people"
+        async with self.session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            people_list = data.get("people", [])
+            self._people_lookup = {
+                p["name"].lower(): p["id"] for p in people_list if p.get("name")
+            }
+
+    def resolve_people_names(self, names: List[str]) -> List[str]:
+        """Converts a list of person names to their UUIDs using the cache."""
+        uuids = []
+        for name in names:
+            clean_name = name.lower().strip()
+            if clean_name in self._people_lookup:
+                uuids.append(self._people_lookup[clean_name])
+            else:
+                logger.warning(
+                    f"Could not find person '{name}' in Immich. Check spelling!"
+                )
+        return uuids
+
+    async def get_album_assets(self, album_id: str) -> Set[str]:
+        """Retrieves asset IDs currently in a specific album."""
+        url = f"{BASE_URL}/api/albums/{album_id}"
+        async with self.session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return {asset["id"] for asset in data.get("assets", [])}
+
+    async def update_album_assets(
+        self, album_id: str, to_add: List[str], to_remove: List[str]
+    ):
+        """Performs bulk addition and removal of assets in chunks for stability."""
+        url = f"{BASE_URL}/api/albums/{album_id}/assets"
+        chunk_size = 2000
+
+        # Add assets
+        for i in range(0, len(to_add), chunk_size):
+            chunk = to_add[i : i + chunk_size]
+            async with self.session.put(url, json={"ids": chunk}) as resp:
+                if resp.status not in (200, 201):
+                    logger.error(
+                        f"Failed to add assets to {album_id}: {await resp.text()}"
+                    )
+
+        # Remove assets
+        for i in range(0, len(to_remove), chunk_size):
+            chunk = to_remove[i : i + chunk_size]
+            async with self.session.delete(url, json={"ids": chunk}) as resp:
+                if resp.status not in (200, 204):
+                    logger.error(
+                        f"Failed to remove assets from {album_id}: {await resp.text()}"
+                    )
 
 
-async def get_or_create_album(session: aiohttp.ClientSession, name: str) -> str:
-    """Finds or creates an album using the shared session."""
-    url: str = f"{IMMICH_BASE_URL}/api/albums"
-    async with session.get(url) as response:
-        response.raise_for_status()
-        albums = await response.json()
-        for album in albums:
-            if album.get("albumName") == name:
-                return str(album["id"])
+def filter_assets(assets: List[Dict[str, Any]], key: str, val: Any) -> List[str]:
+    """
+    Applies a sync rule filter to the full asset list.
+    Uses guard clauses for clarity and speed.
+    """
+    # GUARD: Handle "None" (e.g., photos with no people or no tags)
+    if val is None:
+        return [str(a["id"]) for a in assets if not a.get(key) and "id" in a]
 
-    async with session.post(url, json={"albumName": name}) as response:
-        response.raise_for_status()
-        new_album = await response.json()
-        return str(new_album["id"])
+    # Normalize our target into a set for O(1) lookups
+    target_set: Set[Any] = set(val) if isinstance(val, list) else {val}
+    results: List[str] = []
 
+    for a in assets:
+        asset_id = a.get("id")
+        if not asset_id:
+            continue
 
-def get_asset_ids_by_filter(
-    metadata_dict: dict, filter_key: str, filter_value: Any
-) -> list[str]:
-    """Extracts asset IDs based on metadata criteria."""
-    assets = metadata_dict.get("assets", {}).get("items", [])
-    # 1. Handle "None" (Things/No People)
-    if filter_value is None:
-        return [a["id"] for a in assets if not a.get(filter_key) and "id" in a]
-    # 2. NEW: Handle a List of UUIDs (People)
-    if isinstance(filter_value, list):
-        results: list[str] = []
-        for a in assets:
-            # Get the list of people objects for this asset
-            people_on_photo = a.get(filter_key, [])  # Usually a list of dicts
-            # Extract just the IDs from those objects
-            photo_person_ids = [p.get("id") for p in people_on_photo]
-            # If ANY of our target UUIDs are in the photo's person list
-            if any(target_id in photo_person_ids for target_id in filter_value):
-                results.append(a["id"])
-        return results
-    # 3. Handle strict matches (isFavorite, type, etc.)
-    return [a["id"] for a in assets if a.get(filter_key) == filter_value and "id" in a]
+        raw_meta = a.get(key)
+
+        # GUARD: Handle single values (type="IMAGE", isFavorite=True)
+        if not isinstance(raw_meta, list):
+            if raw_meta in target_set:
+                results.append(str(asset_id))
+            continue
+
+        # LOGIC FOR LISTS: Flatten People (dicts) or Tags (strings)
+        photo_meta_set = {
+            (p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p
+        }
+
+        # Check for ANY overlap between our target and the photo's metadata
+        if not target_set.isdisjoint(photo_meta_set):
+            results.append(str(asset_id))
+
+    return results
 
 
-async def get_current_album_asset_ids(
-    session: aiohttp.ClientSession, album_id: str
-) -> list[str]:
-    """Retrieves all asset IDs currently inside a specific album."""
-    url: str = f"{IMMICH_BASE_URL}/api/albums/{album_id}"
-    async with session.get(url) as response:
-        response.raise_for_status()
-        current_album_data = await response.json()
-        return [asset["id"] for asset in current_album_data.get("assets", [])]
+async def sync_album_task(
+    client: ImmichClient, all_assets: List[dict], config: dict
+) -> dict:
+    """Individual worker task to sync one album."""
+    name = config["name"]
+    key = config["key"]
+    val = config["val"]
 
+    if key == "people" and isinstance(val, list):
+        val = client.resolve_people_names(val)
 
-async def get_people_lookup(session: aiohttp.ClientSession) -> dict[str, str]:
-    """Creates a mapping of { 'Person Name': 'uuid' } from Immich."""
-    url: str = f"{IMMICH_BASE_URL}/api/people"
-    async with session.get(url) as response:
-        response.raise_for_status()
-        people_data = await response.json()
-        # We use .lower() to make the lookup case-insensitive
-        # Note: people_data['people'] is the list in Immich v1.115+
-        people_list = people_data.get("people", [])
-        return {p["name"].lower(): p["id"] for p in people_list if p.get("name")}
+    try:
+        album_id = await client.get_or_create_album(name)
+        target_ids = set(filter_assets(all_assets, key, val))
+        current_ids = await client.get_album_assets(album_id)
 
+        to_add = list(target_ids - current_ids)
+        to_remove = list(current_ids - target_ids)
 
-def resolve_names_to_uuids(
-    target_names: list[str], lookup: dict[str, str]
-) -> list[str]:
-    """Converts a list of names to UUIDs using the lookup table."""
-    uuids = []
-    for name in target_names:
-        clean_name = name.lower().strip()
-        if clean_name in lookup:
-            uuids.append(lookup[clean_name])
-        else:
-            print(
-                f"⚠️ WARNING: Could not find person '{name}'. Is the spelling correct in Immich?"
+        if to_add or to_remove:
+            await client.update_album_assets(album_id, to_add, to_remove)
+            logger.info(
+                f"Album '{name}': Added {len(to_add)}, Removed {len(to_remove)}"
             )
-    return uuids
+        else:
+            logger.debug(f"Album '{name}': Already in sync")
 
-
-async def add_assets_to_album(
-    session: aiohttp.ClientSession, album_id: str, asset_ids: list[str]
-) -> bool:
-    """
-    Adds a list of asset IDs to a specific album.
-    Chunks the input to ensure stability with large datasets.
-    """
-    if not asset_ids:
-        print(f"No assets to add to album {album_id}.")
-        return False
-    url: str = f"{IMMICH_BASE_URL}/api/albums/{album_id}/assets"
-    chunk_size = 2000  # Safe limit for most reverse proxies
-    # Split list into manageable chunks
-    for i in range(0, len(asset_ids), chunk_size):
-        chunk = asset_ids[i : i + chunk_size]
-        payload = {"ids": chunk}
-        async with session.put(url, json=payload) as response:
-            if response.status not in (200, 201):
-                print(f"Failed to add assets: {await response.text()}")
-                return False
-    return True
-
-
-async def remove_assets_from_album(
-    session: aiohttp.ClientSession, album_id: str, asset_ids: list[str]
-) -> bool:
-    """Removes a list of asset IDs from a specific album."""
-    if not asset_ids:
-        return True
-
-    url: str = f"{IMMICH_BASE_URL}/api/albums/{album_id}/assets"
-    payload = {"ids": asset_ids}
-    # Immich uses DELETE with a JSON body for bulk removal
-    async with session.delete(url, json=payload) as response:
-        if response.status not in (200, 204):
-            # print if there's an error (like a 401 or 500)
-            error_text = await response.text()
-            print(f"Failed to remove assets from {album_id}: {error_text}")
-            return False
-    return True
-
-
-async def sync_album(session, data, name, key, val):
-    album_id = await get_or_create_album(session, name)
-    target_ids = set(get_asset_ids_by_filter(data, key, val))
-    current_ids = set(await get_current_album_asset_ids(session, album_id))
-
-    to_add = list(target_ids - current_ids)
-    to_remove = list(current_ids - target_ids)
-
-    if to_add:
-        await add_assets_to_album(session, album_id, to_add)
-    if to_remove:
-        await remove_assets_from_album(session, album_id, to_remove)
-
-    # RETURN the stats for our summary
-    return {"added": len(to_add), "removed": len(to_remove), "total": len(target_ids)}
+        return {
+            "name": name,
+            "added": len(to_add),
+            "removed": len(to_remove),
+            "total": len(target_ids),
+        }
+    except Exception as e:
+        logger.error(f"Failed to sync album '{name}': {e}")
+        return {"name": name, "error": str(e)}
 
 
 async def main() -> None:
-    headers = {"x-api-key": API_KEY, "Content-Type": "application/json"}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        data = await pull_all_immich_metadata(session)
-        people_lookup = await get_people_lookup(session)
-        summary = {}
+    """
+    Main orchestration function:
+    1. Sets up the client and concurrency semaphore.
+    2. Parallelizes the initial data fetch (Metadata, Albums, People).
+    3. Triggers parallel sync tasks for every album in SYNC_CONFIGS.
+    4. Logs a formatted final report.
+    """
+    logger.info("--- Starting Sync Run ---")
+    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        client = ImmichClient(session, sem)
+        logger.info("Loading data (Metadata, Albums, People)...")
+        try:
+            # Run all three initialization tasks in parallel and unpack results
+            # The '_' variables are for tasks that populate the client's internal cache
+            all_assets, _, _ = await asyncio.gather(
+                client.pull_all_metadata(), client.load_albums(), client.load_people()
+            )
+        except Exception as e:
+            logger.error(f"Initialization failed: {e}")
+            return
 
-        for config in SYNC_CONFIGS:
-            name = config["name"]
-            val = config["val"]
-            # 2. If the filter is 'people' and we provided names, resolve them
-            if config["key"] == "people" and isinstance(val, list):
-                val = resolve_names_to_uuids(val, people_lookup)
+        logger.info(
+            f"Syncing {len(SYNC_CONFIGS)} albums defined in local_settings.py..."
+        )
 
-            stats = await sync_album(session, data, name, config["key"], val)
-            summary[name] = stats
+        # Schedule sync tasks for all configured albums
+        sync_tasks = [
+            sync_album_task(client, all_assets, config) for config in SYNC_CONFIGS
+        ]
 
-        # --- PRINT SUMMARY ---
-        print("\n" + "=" * 30)
-        print("FINAL SYNC SUMMARY")
-        print("=" * 30)
-        for name, stats in summary.items():
-            print(f"ALBUM: {name}")
-            print(f"  - Added:   {stats['added']}")
-            print(f"  - Removed: {stats['removed']}")
-            print(f"  - Current Total: {stats['total']}")
-            print("-" * 15)
+        # results will be a list of dictionaries containing sync summaries or errors
+        summaries: List[Dict[str, Any]] = await asyncio.gather(*sync_tasks)
+
+        # Build and Log the Final Report
+        # Using logger.info ensures this table is saved to your .log file for cron history
+        report_header = "\n" + "=" * 65
+        report_header += (
+            f"\n{'ALBUM NAME':<25} | {'ADDED':<6} | {'REM':<6} | {'TOTAL':<6}"
+        )
+        report_header += "\n" + "-" * 65
+        logger.info(report_header)
+
+        for s in summaries:
+            name: str = s.get("name", "Unknown")
+            if "error" in s:
+                logger.error(f"{name:<25} | ERROR: {s['error']}")
+            else:
+                added: int = s.get("added", 0)
+                removed: int = s.get("removed", 0)
+                total: int = s.get("total", 0)
+                logger.info(f"{name:<25} | {added:<6} | {removed:<6} | {total:<6}")
+
+        logger.info("=" * 65)
+        logger.info(f"--- Sync Run Complete. {len(summaries)} albums processed. ---")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        # Standard entry point for the async loop
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Process interrupted by user.")
+    except Exception as e:
+        # Final catch-all for any unhandled exceptions
+        logger.error(f"Fatal error during execution: {e}")
