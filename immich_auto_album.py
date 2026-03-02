@@ -22,7 +22,7 @@ log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 rotating_handler.setFormatter(log_formatter)
 
 stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+stream_handler.setFormatter(log_formatter)
 
 # Configure the root logger
 logging.basicConfig(level=logging.INFO, handlers=[rotating_handler, stream_handler])
