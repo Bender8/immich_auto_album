@@ -7,7 +7,7 @@ import sys
 import traceback
 from email.message import EmailMessage
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -80,6 +80,81 @@ def send_error_email(exc: Exception) -> None:
 # Constants derived from settings
 BASE_URL: str = IMMICH_BASE_URL.rstrip("/")
 HEADERS = {"x-api-key": API_KEY, "Content-Type": "application/json"}
+
+
+def validate_and_normalize_config(configs: List[Dict[str, Any]]) -> None:
+    """
+    Performs a strict pre-flight check of all SYNC_CONFIGS.
+    1. Catches duplicate or empty album names.
+    2. Catches typos in keys (e.g., 'keey', 'operato').
+    3. Normalizes operators to uppercase and injects 'OR' default.
+    4. Validates date formats for BEFORE/AFTER operators.
+    Raises ValueError on the first error found to prevent unsafe syncs.
+    """
+    seen_names = set()
+    VALID_RULE_KEYS = {"key", "val", "operator"}
+    VALID_OPS = {"OR", "AND", "NOT", "ONLY", "BEFORE", "AFTER"}
+
+    for conf in configs:
+        # 1. Validate Album Name
+        album_name = conf.get("name")
+        if not album_name or not isinstance(album_name, str) or not album_name.strip():
+            raise ValueError("Config Error: Found an album with a missing or empty 'name'.")
+
+        clean_name = album_name.strip()
+        if clean_name in seen_names:
+            raise ValueError(f"Config Error: Duplicate album name found: '{clean_name}'.")
+        seen_names.add(clean_name)
+
+        # 2. Validate Filters List
+        rules = conf.get("filters")
+        if not rules or not isinstance(rules, list):
+            raise ValueError(
+                f"Config Error in '{clean_name}': The 'filters' list is empty or missing."
+            )
+
+        for r in rules:
+            # 3. Catch Key Typos (e.g., 'keey', 'operato')
+            extra_keys = set(r.keys()) - VALID_RULE_KEYS
+            if extra_keys:
+                raise ValueError(
+                    f"Config Error in '{clean_name}': Unknown key(s) {list(extra_keys)} found in a rule."
+                )
+
+            # 4. Check for Mandatory Rule Fields
+            if "key" not in r or "val" not in r:
+                raise ValueError(
+                    f"Config Error in '{clean_name}': Every rule must contain both 'key' and 'val'."
+                )
+
+            # 5. Normalize and Validate Operator
+            # Default to OR if missing, then ensure it's uppercase and valid
+            r["operator"] = str(r.get("operator", "OR")).upper()
+            op = r["operator"]
+
+            if op not in VALID_OPS:
+                raise ValueError(
+                    f"Config Error in '{clean_name}': Invalid operator '{op}'. Must be one of {VALID_OPS}"
+                )
+
+            # 6. Validate Date Formats for Date-based Operators
+            if op in ("BEFORE", "AFTER"):
+                date_val = r.get("val")
+                if not isinstance(date_val, str):
+                    raise ValueError(
+                        f"Config Error in '{clean_name}': Date operator '{op}' requires a string value (YYYY-MM-DD)."
+                    )
+                try:
+                    # Validates both format and calendar logic (e.g., catches Feb 30th)
+                    datetime.date.fromisoformat(date_val)
+                except ValueError:
+                    raise ValueError(
+                        f"Config Error in '{clean_name}': Invalid date value '{date_val}' for operator '{op}'. "
+                        "Must be a valid 'YYYY-MM-DD' calendar date."
+                    )
+            # 7. Auto-correct: if key is 'people' and val is a string, wrap it in a list
+            if r.get("key") == "people" and isinstance(r.get("val"), str):
+                r["val"] = [r["val"]]
 
 
 class ImmichClient:
@@ -169,16 +244,20 @@ class ImmichClient:
             people_list = data.get("people", [])
             self._people_lookup = {p["name"].lower(): p["id"] for p in people_list if p.get("name")}
 
-    def resolve_people_names(self, names: List[str]) -> List[str]:
-        """Converts a list of person names to their UUIDs using the cache."""
+    def resolve_people_names(self, names: List[str]) -> Tuple[List[str], List[str]]:
+        """
+        Converts names to UUIDs.
+        Returns: (list_of_uuids, list_of_missing_names)
+        """
         uuids = []
+        missing = []
         for name in names:
             clean_name = name.lower().strip()
             if clean_name in self._people_lookup:
                 uuids.append(self._people_lookup[clean_name])
             else:
-                logger.warning(f"Could not find person '{name}' in Immich. Check spelling!")
-        return uuids
+                missing.append(name)
+        return uuids, missing
 
     async def get_album_assets(self, album_id: str) -> Set[str]:
         """Retrieves asset IDs currently in a specific album."""
@@ -211,39 +290,21 @@ class ImmichClient:
 def check_single_filter(asset: Dict[str, Any], rule: Dict[str, Any]) -> bool:
     """
     Evaluates a single metadata rule against an asset.
-    Supported operators: OR (default), AND, NOT, ONLY.
+    Assumes rule['operator'] is present and uppercase (validated in main).
     """
-    key = rule["key"]
-    val = rule["val"]
-    # Default to "OR" and handle case-insensitivity for safety
-    op = str(rule.get("operator", "OR")).upper()
-
+    key, val, op = rule["key"], rule["val"], rule["operator"]
     raw_meta = asset.get(key)
 
-    # 1. Handle date operators BEFORE, AFTER
-    if op in ["BEFORE", "AFTER"]:
-        if not raw_meta or not isinstance(raw_meta, str) or not isinstance(val, str):
-            logger.debug(
-                f"Skipping date filter for asset {asset.get('id')} due to missing/invalid date metadata or rule value: key='{key}', asset_meta='{raw_meta}', rule_val='{val}'"
-            )
-            return False  # Cannot evaluate if date metadata is missing or invalid
-
+    # 1. Date Operators
+    if op in ("BEFORE", "AFTER"):
+        if not (isinstance(raw_meta, str) and isinstance(val, str)):
+            return False
         try:
-            # Asset date format: "YYYY-MM-DDTHH:MM:SS.sssZ", extract date part
-            asset_date_str = raw_meta.split("T")[0]
-            asset_date = datetime.date.fromisoformat(asset_date_str)
-            # Rule value is expected in "YYYY-MM-DD" format
+            asset_date = datetime.date.fromisoformat(raw_meta.split("T")[0])
             rule_date = datetime.date.fromisoformat(val)
-
-            if op == "BEFORE":
-                return asset_date < rule_date
-            elif op == "AFTER":
-                return asset_date > rule_date
+            return asset_date < rule_date if op == "BEFORE" else asset_date > rule_date
         except ValueError:
-            logger.warning(
-                f"Invalid date format for key '{key}' or value '{val}'. Asset date: '{raw_meta}'. Rule value: '{val}'. Skipping filter for asset {asset.get('id')}."
-            )
-            return False  # If date parsing fails, this filter cannot be met
+            return False
 
     # 2. Handle "None" (Untagged/No People)
     # Logic: if op is NOT, we want photos that DO have people.
@@ -252,39 +313,30 @@ def check_single_filter(asset: Dict[str, Any], rule: Dict[str, Any]) -> bool:
         has_no_meta = not raw_meta
         return not has_no_meta if op == "NOT" else has_no_meta
 
-    # 3. Normalize Target and Asset Metadata into Sets
+    # 3. Guard against empty list in val (mistake in config resolution)
+    if isinstance(val, list) and not val:
+        return False
+
+    # 4. Normalize Target and Asset into Sets
     target_set = set(val) if isinstance(val, list) else {val}
 
     if isinstance(raw_meta, list):
-        # Flatten People (dicts) or Tags (strings)
         asset_set = {(p.get("id") if isinstance(p, dict) else p) for p in raw_meta if p}
-    else:
-        # Handle single values (type, isFavorite, etc.)
+    elif raw_meta is not None:
         asset_set = {raw_meta}
+    else:
+        asset_set = set()
 
-    # 4. Apply Logic based on Operator
+    # 5. Logical Operators
     if op == "AND":
-        # Every item in target must be in the asset
         return target_set.issubset(asset_set)
-
-    elif op == "ONLY":
-        # Asset must contain exactly the target items and no others
+    if op == "ONLY":
         return target_set == asset_set
-
-    elif op == "NOT":
-        # Asset must contain NONE of the target items
+    if op == "NOT":
         return target_set.isdisjoint(asset_set)
 
-    elif op == "OR":  # Explicitly handle "OR" as a valid operator
-        # Asset must contain AT LEAST ONE of the target items
-        return not target_set.isdisjoint(asset_set)
-    else:
-        logger.warning(
-            f"Unsupported or missing operator '{op}' for key '{key}' and value '{val}'. Defaulting to 'OR' logic. "
-            f"Please check your SYNC_CONFIGS for typos."
-        )
-        # Fallback to OR logic for unrecognized operators
-        return not target_set.isdisjoint(asset_set)
+    # Default/OR logic (Already validated as 'OR' if not one of the above)
+    return not target_set.isdisjoint(asset_set)
 
 
 def filter_assets(assets: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> List[str]:
@@ -309,10 +361,19 @@ async def sync_album_task(client: ImmichClient, all_assets: List[dict], config: 
     name: str = config["name"]
     rules: List[dict] = config["filters"]
 
-    # Clean up any 'people' names in the filters into UUIDs immediately
+    # 1. Resolve and Validate
     for r in rules:
         if r.get("key") == "people" and isinstance(r.get("val"), list):
-            r["val"] = client.resolve_people_names(r["val"])
+            uuids, missing = client.resolve_people_names(r["val"])
+
+            if missing:
+                error_msg = f"Unknown person(s): {', '.join(missing)}"
+                # This log goes to your file; the return goes to the report table
+                logger.error(f"Sync aborted for '{name}': {error_msg}")
+                return {"name": name, "error": error_msg}
+
+            # Update the rule with UUIDs now that we know they are all valid
+            r["val"] = uuids
 
     try:
         album_id = await client.get_or_create_album(name)
@@ -350,6 +411,14 @@ async def main() -> None:
     4. Logs a formatted final report.
     """
     logger.info("--- Starting Sync Run ---")
+
+    try:
+        # Validate everything before doing ANY work
+        validate_and_normalize_config(SYNC_CONFIGS)
+    except ValueError as e:
+        logger.error(f"Configuration Validation Failed: {e}")
+        return  # Stop execution immediately
+
     sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         client = ImmichClient(session, sem)

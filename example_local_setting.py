@@ -45,11 +45,11 @@ EMAIL_TO: str = "recipient@example.com"
 
 SYNC_CONFIGS = [
     # Example 1: Simple Boolean Filter (Favorites)
-    {"name": "Favorites-Auto", "filters": [{"key": "isFavorite", "val": True, "operator": "OR"}]},
+    {"name": "Favorites-Auto", "filters": [{"key": "isFavorite", "val": True}]},
     # Example 2: Attribute Filter (Exclude Videos)
     {"name": "Photos-Only-Auto", "filters": [{"key": "type", "val": "VIDEO", "operator": "NOT"}]},
     # Example 3: Find photos with NO people tagged (Landscapes/Objects/Untagged)
-    {"name": "Things-Auto", "filters": [{"key": "people", "val": None, "operator": "OR"}]},
+    {"name": "Things-Auto", "filters": [{"key": "people", "val": None}]},
     # Example 4: OR Logic (Includes photos of Person A, Person B, OR Person C)
     {
         "name": "Family-Auto",
@@ -76,7 +76,7 @@ SYNC_CONFIGS = [
         "name": "Best-Family-Moments-Auto",
         "filters": [
             {"key": "people", "val": ["Person A", "Person B"], "operator": "OR"},
-            {"key": "isFavorite", "val": True, "operator": "OR"},
+            {"key": "isFavorite", "val": True},
             {"key": "type", "val": "VIDEO", "operator": "NOT"},
         ],
     },
