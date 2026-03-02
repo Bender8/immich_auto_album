@@ -9,7 +9,7 @@ Rules use keys from the Immich Search API: https://api.immich.app/endpoints/sear
 ## Features
 
 - Fast & Asynchronous: Uses `aiohttp` and `asyncio` to process thousands of assets quickly.
-- Smart Logic: Supports flexible operators (`AND`, `OR`, `NOT`, `ONLY`) for precise filtering.
+- Smart Logic: Supports flexible operators (`AND`, `OR`, `NOT`, `ONLY`, `BEFORE`, `AFTER`) for precise filtering.
 - Multi-filter Support: Combine rules (e.g., "Favorite Videos of Person A").
 - Declarative Sync: Automatically adds matching assets and removes those that no longer match.
 - Safe Execution: Concurrency semaphores prevent overwhelming your Immich server.
@@ -185,6 +185,11 @@ Supported operators:
 - `AND` — asset matches all values in `val`
 - `NOT` — asset matches none of the values in `val`
 - `ONLY` — asset matches exactly the values in `val` and no others
+- `BEFORE` — for date keys: asset's date must be before the rule `val` (strict `<`). Rule `val` must be `YYYY-MM-DD`.
+- `AFTER` — for date keys: asset's date must be after the rule `val` (strict `>`). Rule `val` must be `YYYY-MM-DD`.
+
+Note about date filters:
+- Use `BEFORE` and `AFTER` with ISO date strings (`YYYY-MM-DD`). The script extracts the date portion from Immich's ISO timestamps (e.g., `2025-04-30T00:13:05.000Z`) and compares dates. If the rule `val` is not in `YYYY-MM-DD` format, the filter for that asset will be skipped and a warning will be logged.
 
 ---
 
