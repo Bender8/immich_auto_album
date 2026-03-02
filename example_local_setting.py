@@ -22,17 +22,22 @@ EMAIL_TO: str = "recipient@example.com"
 # --- SYNC_CONFIGS SETUP ---
 # Each entry creates or updates an Immich Album based on "Sync Rules."
 # Rules use keys from the Immich Search API: https://api.immich.app/endpoints/search/searchAssets
+# Example of metadata used for filtering below shown at end of this file.
 
 # CONFIGURATION GUIDE:
 # 1. 'name': The album name (will be created automatically if missing).
 # 2. 'filters': A list of conditions. Assets must pass ALL filters to be added (AND logic).
-# 3. 'key' & 'val': The metadata field and the value to match (e.g., "type": "VIDEO").
+# #3. 'key' & 'val': The metadata field and the value to match (e.g., "type": "VIDEO").
+#    - For date filters ('BEFORE', 'AFTER'), 'val' MUST be a string in "YYYY-MM-DD" format.
+#      This is important as it differs from common US date formats (e.g., MM-DD-YYYY).
 # 4. 'people': Use the Display Name from the Immich Web UI (e.g., "John Doe"), NOT the UUID.
 # 5. 'operator' (Optional - Case Insensitive):
 #    - "OR" (Default): Adds photo if AT LEAST ONE listed value matches.
 #    - "AND": Adds photo only if EVERY listed value is present.
 #    - "NOT": Adds photo only if NONE of the listed values are present.
 #    - "ONLY": Adds photo only if the metadata matches your list EXACTLY (no others allowed).
+#    - "BEFORE": Adds photo only if the date is before the specified value.
+#    - "AFTER": Adds photo only if the date is after the specified value.
 
 # SPECIAL CASE: "val": None
 # Using "key": "people" with "val": None finds photos with no face tags.
@@ -75,4 +80,48 @@ SYNC_CONFIGS = [
             {"key": "type", "val": "VIDEO", "operator": "NOT"},
         ],
     },
+    # Example 8: Date Range Filter (Photos taken between two dates)
+    {
+        "name": "Person A - 2023",
+        "filters": [
+            {"key": "people", "val": ["Person A"], "operator": "OR"},
+            {"key": "fileCreatedAt", "val": "2022-12-31", "operator": "AFTER"},
+            {"key": "fileCreatedAt", "val": "2024-01-01", "operator": "BEFORE"},
+        ],
+    },
 ]
+
+# Example of metadata used for filtering below:
+# {
+# "id": "6418c37d-35b0-4011-882d-36946bc00eb7",
+# "createdAt": "2026-01-20T15:23:58.024Z",
+# "deviceAssetId": "cc2479e3-2d66-483c-8ad9-187b237d891d.jpg-1779462",
+# "ownerId": "6bbe2767-7851-461a-aa2d-afbd3460aa85",
+# "deviceId": "CLI",
+# "libraryId": null,
+# "type": "IMAGE",
+# "originalPath": "/data/upload/6bbe2767-7851-461a-aa2d-afbd3460aa85/19/eb/19eb57f1-adf2-4f40-abbd-10412d55a70f.jpg",
+# "originalFileName": "cc2479e3-2d66-483c-8ad9-187b237d891d.jpg",
+# "originalMimeType": "image/jpeg",
+# "thumbhash": "JggiBoCHeIePeIiFd3h3iIeIAAAAAAA=",
+# "fileCreatedAt": "2025-04-30T00:13:05.000Z",
+# "fileModifiedAt": "2025-05-01T14:27:18.591Z",
+# "localDateTime": "2025-04-30T00:13:05.000Z",
+# "updatedAt": "2026-03-02T00:19:21.409Z",
+# "isFavorite": false,
+# "isArchived": false,
+# "isTrashed": false,
+# "visibility": "timeline",
+# "duration": "0:00:00.00000",
+# "livePhotoVideoId": null,
+# "people": [],
+# "unassignedFaces": [],
+# "checksum": "aVw2iQTS44pAOPYMVkWZrd4TIpA=",
+# "isOffline": false,
+# "hasMetadata": true,
+# "duplicateId": null,
+# "resized": true,
+# "width": 4537,
+# "height": 3648,
+# "isEdited": false
+# }

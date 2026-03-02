@@ -1,4 +1,5 @@
 import asyncio
+import datetime  # Added for date filtering
 import logging
 import smtplib
 import ssl
@@ -219,14 +220,39 @@ def check_single_filter(asset: Dict[str, Any], rule: Dict[str, Any]) -> bool:
 
     raw_meta = asset.get(key)
 
-    # 1. Handle "None" (Untagged/No People)
+    # 1. Handle date operators BEFORE, AFTER
+    if op in ["BEFORE", "AFTER"]:
+        if not raw_meta or not isinstance(raw_meta, str) or not isinstance(val, str):
+            logger.debug(
+                f"Skipping date filter for asset {asset.get('id')} due to missing/invalid date metadata or rule value: key='{key}', asset_meta='{raw_meta}', rule_val='{val}'"
+            )
+            return False  # Cannot evaluate if date metadata is missing or invalid
+
+        try:
+            # Asset date format: "YYYY-MM-DDTHH:MM:SS.sssZ", extract date part
+            asset_date_str = raw_meta.split("T")[0]
+            asset_date = datetime.date.fromisoformat(asset_date_str)
+            # Rule value is expected in "YYYY-MM-DD" format
+            rule_date = datetime.date.fromisoformat(val)
+
+            if op == "BEFORE":
+                return asset_date < rule_date
+            elif op == "AFTER":
+                return asset_date > rule_date
+        except ValueError:
+            logger.warning(
+                f"Invalid date format for key '{key}' or value '{val}'. Asset date: '{raw_meta}'. Rule value: '{val}'. Skipping filter for asset {asset.get('id')}."
+            )
+            return False  # If date parsing fails, this filter cannot be met
+
+    # 2. Handle "None" (Untagged/No People)
     # Logic: if op is NOT, we want photos that DO have people.
     # Otherwise, we want photos that HAVE NO people.
     if val is None:
         has_no_meta = not raw_meta
         return not has_no_meta if op == "NOT" else has_no_meta
 
-    # 2. Normalize Target and Asset Metadata into Sets
+    # 3. Normalize Target and Asset Metadata into Sets
     target_set = set(val) if isinstance(val, list) else {val}
 
     if isinstance(raw_meta, list):
@@ -236,21 +262,28 @@ def check_single_filter(asset: Dict[str, Any], rule: Dict[str, Any]) -> bool:
         # Handle single values (type, isFavorite, etc.)
         asset_set = {raw_meta}
 
-    # 3. Apply Logic based on Operator
+    # 4. Apply Logic based on Operator
     if op == "AND":
         # Every item in target must be in the asset
         return target_set.issubset(asset_set)
 
     elif op == "ONLY":
-        # Asset must contain exactly the target items and nothing else
+        # Asset must contain exactly the target items and no others
         return target_set == asset_set
 
     elif op == "NOT":
         # Asset must contain NONE of the target items
         return target_set.isdisjoint(asset_set)
 
-    else:  # Default to "OR"
+    elif op == "OR":  # Explicitly handle "OR" as a valid operator
         # Asset must contain AT LEAST ONE of the target items
+        return not target_set.isdisjoint(asset_set)
+    else:
+        logger.warning(
+            f"Unsupported or missing operator '{op}' for key '{key}' and value '{val}'. Defaulting to 'OR' logic. "
+            f"Please check your SYNC_CONFIGS for typos."
+        )
+        # Fallback to OR logic for unrecognized operators
         return not target_set.isdisjoint(asset_set)
 
 
