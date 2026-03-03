@@ -1,5 +1,6 @@
 import asyncio
-import datetime  # Added for date filtering
+import copy
+import datetime
 import logging
 import smtplib
 import ssl
@@ -12,21 +13,16 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import aiohttp
 
 # --- LOGGING CONFIGURATION ---
-# maxBytes: 5 * 1024 * 1024 is 5 Megabytes
-# backupCount: Keeps the 3 most recent historical log files
 rotating_handler = RotatingFileHandler(
     "immich_auto_album.log", maxBytes=5 * 1024 * 1024, backupCount=3
 )
 
-# Define the format for both handlers
-log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-rotating_handler.setFormatter(log_formatter)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[rotating_handler, logging.StreamHandler(sys.stdout)],
+)
 
-stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(log_formatter)
-
-# Configure the root logger
-logging.basicConfig(level=logging.INFO, handlers=[rotating_handler, stream_handler])
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +53,7 @@ def send_error_email(exc: Exception) -> None:
 
     try:
         tb = traceback.format_exc()
-        subject = f"[Auto Album Sync] Unhandled exception: {type(exc).__name__}"
+        subject = f"[Immich Auto Album] Unhandled exception: {type(exc).__name__}"
         body = f"An unhandled exception occurred in immich_auto_album.py:\n\nException: {exc}\n\nTraceback:\n{tb}"
 
         msg = EmailMessage()
@@ -82,7 +78,7 @@ BASE_URL: str = IMMICH_BASE_URL.rstrip("/")
 HEADERS = {"x-api-key": API_KEY, "Content-Type": "application/json"}
 
 
-def validate_and_normalize_config(configs: List[Dict[str, Any]]) -> None:
+def Config_check(configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Performs a strict pre-flight check of all SYNC_CONFIGS.
     1. Catches duplicate or empty album names.
@@ -94,8 +90,9 @@ def validate_and_normalize_config(configs: List[Dict[str, Any]]) -> None:
     seen_names = set()
     VALID_RULE_KEYS = {"key", "val", "operator"}
     VALID_OPS = {"OR", "AND", "NOT", "ONLY", "BEFORE", "AFTER"}
+    clean_config = copy.deepcopy(configs)
 
-    for conf in configs:
+    for conf in clean_config:
         # 1. Validate Album Name
         album_name = conf.get("name")
         if not album_name or not isinstance(album_name, str) or not album_name.strip():
@@ -155,6 +152,8 @@ def validate_and_normalize_config(configs: List[Dict[str, Any]]) -> None:
             # 7. Auto-correct: if key is 'people' and val is a string, wrap it in a list
             if r.get("key") == "people" and isinstance(r.get("val"), str):
                 r["val"] = [r["val"]]
+
+    return clean_config
 
 
 class ImmichClient:
@@ -412,12 +411,7 @@ async def main() -> None:
     """
     logger.info("--- Starting Sync Run ---")
 
-    try:
-        # Validate everything before doing ANY work
-        validate_and_normalize_config(SYNC_CONFIGS)
-    except ValueError as e:
-        logger.error(f"Configuration Validation Failed: {e}")
-        return  # Stop execution immediately
+    normalized_sync_configs = Config_check(SYNC_CONFIGS)
 
     sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     async with aiohttp.ClientSession(headers=HEADERS) as session:
@@ -433,19 +427,25 @@ async def main() -> None:
             logger.error(f"Initialization failed: {e}")
             raise
 
-        logger.info(f"Syncing {len(SYNC_CONFIGS)} albums defined in local_settings.py...")
+        logger.info(
+            f"Syncing {len(normalized_sync_configs)} albums defined in local_settings.py..."
+        )
 
         # Schedule sync tasks for all configured albums
-        sync_tasks = [sync_album_task(client, all_assets, config) for config in SYNC_CONFIGS]
+        sync_tasks = [
+            sync_album_task(client, all_assets, config) for config in normalized_sync_configs
+        ]
 
         # results will be a list of dictionaries containing sync summaries or errors
         summaries: List[Dict[str, Any]] = await asyncio.gather(*sync_tasks)
 
         # Build and Log the Final Report
         # Using logger.info ensures this table is saved to your .log file for cron history
-        report_header = "\n" + "=" * 65
-        report_header += f"\n{'ALBUM NAME':<25} | {'ADDED':<6} | {'REM':<6} | {'TOTAL':<6}"
-        report_header += "\n" + "-" * 65
+        report_header = "\n" + " " * 31 + "=" * 65
+        report_header += (
+            "\n" + " " * 31 + f"{'ALBUM NAME':<25} | {'ADDED':<6} | {'REM':<6} | {'TOTAL':<6}"
+        )
+        report_header += "\n" + " " * 31 + "-" * 65
         logger.info(report_header)
 
         for s in summaries:
@@ -470,10 +470,9 @@ if __name__ == "__main__":
         logger.info("Process interrupted by user.")
     except Exception as e:
         # Final catch-all for any unhandled exceptions
-        logger.error(f"Fatal error during execution: {e}")
+        logger.error(f"Fatal error during execution: {e}", exc_info=True)
         # Send email notification if enabled
         try:
             send_error_email(e)
         except Exception:
-            # send_error_email already logs failures; avoid raising from the global exception handler
             pass
