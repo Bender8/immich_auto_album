@@ -9,7 +9,8 @@ Rules use keys from the Immich Search API: https://api.immich.app/endpoints/sear
 ## Features
 
 - Fast & Asynchronous: Uses `aiohttp` and `asyncio` to process thousands of assets quickly.
-- Smart Logic: Supports flexible operators (`AND`, `OR`, `NOT`, `ONLY`, `BEFORE`, `AFTER`) for precise filtering.
+- Smart Logic: Supports flexible operators:
+    (`AND`, `OR`, `NOT`, `ONLY`, `ONLY_ANY`, `BEFORE`, `AFTER`) for precise filtering.
 - Multi-filter Support: Combine rules (e.g., "Favorite Videos of Person A").
 - Declarative Sync: Automatically adds matching assets and removes those that no longer match.
 - Safe Execution: Concurrency semaphores prevent overwhelming your Immich server.
