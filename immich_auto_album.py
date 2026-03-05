@@ -110,24 +110,24 @@ def Config_check(configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 f"Config Error in '{clean_name}': The 'filters' list is empty or missing."
             )
 
-        for r in rules:
+        for rule in rules:
             # 3. Catch Key Typos (e.g., 'keey', 'operato')
-            extra_keys = set(r.keys()) - VALID_RULE_KEYS
+            extra_keys = set(rule.keys()) - VALID_RULE_KEYS
             if extra_keys:
                 raise ValueError(
                     f"Config Error in '{clean_name}': Unknown key(s) {list(extra_keys)} found in a rule."
                 )
 
             # 4. Check for Mandatory Rule Fields
-            if "key" not in r or "val" not in r:
+            if "key" not in rule or "val" not in rule:
                 raise ValueError(
                     f"Config Error in '{clean_name}': Every rule must contain both 'key' and 'val'."
                 )
 
             # 5. Normalize and Validate Operator
             # Default to OR if missing, then ensure it's uppercase and valid
-            r["operator"] = str(r.get("operator", "OR")).upper()
-            op = r["operator"]
+            rule["operator"] = str(rule.get("operator", "OR")).upper()
+            op = rule["operator"]
 
             if op not in VALID_OPS:
                 raise ValueError(
@@ -136,7 +136,7 @@ def Config_check(configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
             # 6. Validate Date Formats for Date-based Operators
             if op in ("BEFORE", "AFTER"):
-                date_val = r.get("val")
+                date_val = rule.get("val")
                 if not isinstance(date_val, str):
                     raise ValueError(
                         f"Config Error in '{clean_name}': Date operator '{op}' requires a string value (YYYY-MM-DD)."
@@ -150,8 +150,8 @@ def Config_check(configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "Must be a valid 'YYYY-MM-DD' calendar date."
                     )
             # 7. Auto-correct: if key is 'people' and val is a string, wrap it in a list
-            if r.get("key") == "people" and isinstance(r.get("val"), str):
-                r["val"] = [r["val"]]
+            if rule.get("key") == "people" and isinstance(rule.get("val"), str):
+                rule["val"] = [rule["val"]]
 
     return clean_config
 
@@ -176,9 +176,9 @@ class ImmichClient:
             try:
                 async with self.session.post(url, json=payload, timeout=30) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
+                        all_metadata_resp_json = await resp.json()
                         # Return items list; Immich usually returns [] at the end
-                        return data.get("assets", {}).get("items", [])
+                        return all_metadata_resp_json.get("assets", {}).get("items", [])
 
                     logger.error(f"Page {page} failed with status {resp.status}")
                     return None  # Signal a non-terminal error
@@ -239,8 +239,8 @@ class ImmichClient:
         url = f"{BASE_URL}/api/people"
         async with self.session.get(url) as resp:
             resp.raise_for_status()
-            data = await resp.json()
-            people_list = data.get("people", [])
+            people_resp_json = await resp.json()
+            people_list = people_resp_json.get("people", [])
             self._people_lookup = {p["name"].lower(): p["id"] for p in people_list if p.get("name")}
 
     def resolve_people_names(self, names: List[str]) -> Tuple[List[str], List[str]]:
@@ -263,8 +263,8 @@ class ImmichClient:
         url = f"{BASE_URL}/api/albums/{album_id}"
         async with self.session.get(url) as resp:
             resp.raise_for_status()
-            data = await resp.json()
-            return {asset["id"] for asset in data.get("assets", [])}
+            album_assets_resp_json = await resp.json()
+            return {asset["id"] for asset in album_assets_resp_json.get("assets", [])}
 
     async def update_album_assets(self, album_id: str, to_add: List[str], to_remove: List[str]):
         """Performs bulk addition and removal of assets in chunks for stability."""
@@ -345,12 +345,12 @@ def filter_assets(assets: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> 
     """
     results: List[str] = []
 
-    for a in assets:
-        asset_id = a.get("id")
+    for asset in assets:
+        asset_id = asset.get("id")
         if not asset_id:
             continue
         # A photo starts as "passed" and must survive every rule
-        if all(check_single_filter(a, r) for r in rules):
+        if all(check_single_filter(asset, rule) for rule in rules):
             results.append(str(asset_id))
     return results
 
@@ -361,9 +361,9 @@ async def sync_album_task(client: ImmichClient, all_assets: List[dict], config: 
     rules: List[dict] = config["filters"]
 
     # 1. Resolve and Validate
-    for r in rules:
-        if r.get("key") == "people" and isinstance(r.get("val"), list):
-            uuids, missing = client.resolve_people_names(r["val"])
+    for rule in rules:
+        if rule.get("key") == "people" and isinstance(rule.get("val"), list):
+            uuids, missing = client.resolve_people_names(rule["val"])
 
             if missing:
                 error_msg = f"Unknown person(s): {', '.join(missing)}"
@@ -372,7 +372,7 @@ async def sync_album_task(client: ImmichClient, all_assets: List[dict], config: 
                 return {"name": name, "error": error_msg}
 
             # Update the rule with UUIDs now that we know they are all valid
-            r["val"] = uuids
+            rule["val"] = uuids
 
     try:
         album_id = await client.get_or_create_album(name)
@@ -433,7 +433,7 @@ async def main() -> None:
 
         # Schedule sync tasks for all configured albums
         sync_tasks = [
-            sync_album_task(client, all_assets, config) for config in normalized_sync_configs
+            sync_album_task(client, all_assets, album_cfg) for album_cfg in normalized_sync_configs
         ]
 
         # results will be a list of dictionaries containing sync summaries or errors
