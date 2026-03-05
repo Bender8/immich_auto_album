@@ -36,6 +36,7 @@ EMAIL_TO: str = "recipient@example.com"
 #    - "AND": Adds photo only if EVERY listed value is present.
 #    - "NOT": Adds photo only if NONE of the listed values are present.
 #    - "ONLY": Adds photo only if the metadata matches your list EXACTLY (no others allowed).
+#    - "ONLY_ANY": Adds photo only if AT LEAST ONE listed value matches but no others are allowed.
 #    - "BEFORE": Adds photo only if the date is before the specified value.
 #    - "AFTER": Adds photo only if the date is after the specified value.
 
@@ -71,7 +72,14 @@ SYNC_CONFIGS = [
             {"key": "people", "val": ["Person A"], "operator": "ONLY"},
         ],
     },
-    # Example 7: Complex Multi-filter (Specific people AND must be a favorite AND NOT a video)
+    # Example 7: ONLY_ANY Logic (Only includes photos where Person A or Person B or Person C is present and no one else)
+    {
+        "name": "Couple-Auto",
+        "filters": [
+            {"key": "people", "val": ["Person A", "Person B", "Person C"], "operator": "ONLY_ANY"},
+        ],
+    },
+    # Example 8: Complex Multi-filter (Specific people AND must be a favorite AND NOT a video)
     {
         "name": "Best-Family-Moments-Auto",
         "filters": [
@@ -80,7 +88,7 @@ SYNC_CONFIGS = [
             {"key": "type", "val": "VIDEO", "operator": "NOT"},
         ],
     },
-    # Example 8: Date Range Filter (Photos taken between two dates)
+    # Example 9: Date Range Filter (Photos taken between two dates)
     {
         "name": "Person A - 2023",
         "filters": [

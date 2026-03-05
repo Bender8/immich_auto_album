@@ -89,7 +89,7 @@ def Config_check(configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     seen_names = set()
     VALID_RULE_KEYS = {"key", "val", "operator"}
-    VALID_OPS = {"OR", "AND", "NOT", "ONLY", "BEFORE", "AFTER"}
+    VALID_OPS = {"OR", "AND", "NOT", "ONLY", "ONLY_ANY", "BEFORE", "AFTER"}
     clean_config = copy.deepcopy(configs)
 
     for conf in clean_config:
@@ -331,6 +331,8 @@ def check_single_filter(asset: Dict[str, Any], rule: Dict[str, Any]) -> bool:
         return target_set.issubset(asset_set)
     if op == "ONLY":
         return target_set == asset_set
+    if op == "ONLY_ANY":
+        return asset_set.issubset(target_set) and not target_set.isdisjoint(asset_set)
     if op == "NOT":
         return target_set.isdisjoint(asset_set)
 
